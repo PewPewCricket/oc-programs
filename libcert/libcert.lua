@@ -4,8 +4,8 @@ local serialization = require("serialization")
 local fs = require("filesystem")
 
 local data = component.getPrimary("data")
-if (not data) or (not data.ed25519) then
-    error("libcert requires a t3 data card supporting ed25519 signing.")
+if (not data) or (not data.ecdsa) then
+    error("libcert requires a t3 data card.")
 end
 
 local certdir = "/etc/certs"
@@ -27,13 +27,11 @@ end
 
 local function encodeSafe64(s)
     checkArg(1, s, "string")
-
     return data.encode64(s):gsub("%+", "-"):gsub("/", "_")
 end
 
 local function decodeSafe64(s)
     checkArg(1, s, "string")
-
     return data.decode64(s:gsub("-", "+"):gsub("_", "/"))
 end
 
@@ -64,7 +62,16 @@ p.sign = function(certPart, key)
     checkArg(1, certPart, "string")
     checkArg(2, key, "table")
 
-    local sig = data.ed25519(certPart, key)
+    local sig
+    local keyType = key.keyType()
+    if keyType == "ed25519-private" then
+        sig = data.ed25519(certPart, key)
+    elseif keyType == "ec-private" then
+        sig = data.ecdsa(certPart, key)
+    else
+        error("invalid key type")
+    end
+
     local cert = certPart .. string.pack("s1", sig)
 
     return cert
@@ -164,6 +171,13 @@ p.verify = function(cert, depth)
         return false
     end
 
+    local curtime = os.time()
+    if not (from == 0 and to == 0) then
+        if curtime > to or curtime < from or to < from then
+            return false
+        end
+    end
+
     local trustedFile = io.open(trustedPath, "r")
     if trustedFile then
         local trustedList = serialization.unserialize(trustedFile:read("*a"))
@@ -178,7 +192,11 @@ p.verify = function(cert, depth)
         return false
     end
 
-    local icert = p.load(issuer)
+    local ok, icert = pcall(p.load, issuer)
+    if not ok or not icert then
+        return false
+    end
+
     if not p.verify(icert, depth) then
         return false
     end
@@ -188,20 +206,16 @@ p.verify = function(cert, depth)
         return false
     end
 
-    local curtime = os.time()
-    if not (from == 0 and to == 0) then
-        if curtime > to or curtime < from or to < from then
-            return false
-        end
-    end
-
     local certPayload = cert:sub(1, -(2 + #sig))
 
-    if data.ed25519(certPayload, ikey, sig) then
-        return true
-    else
-        return false
+    local ikeyType = ikey.keyType()
+    if ikeyType == "ed25519-public" then
+        if data.ed25519(certPayload, ikey, sig) then return true end
+    elseif ikeyType == "ec-public" then
+        if data.ecdsa(certPayload, ikey, sig) then return true end
     end
+
+    return false
 end
 
 p.hasIssuer = function(cert)
